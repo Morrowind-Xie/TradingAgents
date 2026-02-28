@@ -3,8 +3,24 @@ from typing import Annotated
 # Import from vendor-specific modules
 from .local import get_YFin_data, get_finnhub_news, get_finnhub_company_insider_sentiment, get_finnhub_company_insider_transactions, get_simfin_balance_sheet, get_simfin_cashflow, get_simfin_income_statements, get_reddit_global_news, get_reddit_company_news
 from .y_finance import get_YFin_data_online, get_stock_stats_indicators_window, get_balance_sheet as get_yfinance_balance_sheet, get_cashflow as get_yfinance_cashflow, get_income_statement as get_yfinance_income_statement, get_insider_transactions as get_yfinance_insider_transactions
-from .google import get_google_news
+from .google import get_google_news, get_news_google, get_global_news_google
 from .openai import get_stock_news_openai, get_global_news_openai, get_fundamentals_openai
+from .tushare_cn import (
+    get_stock_data_tushare,
+    get_fundamentals_tushare,
+    get_balance_sheet_tushare,
+    get_cashflow_tushare,
+    get_income_statement_tushare,
+)
+from .akshare_cn import (
+    get_stock_data_akshare,
+    get_fundamentals_akshare,
+    get_balance_sheet_akshare,
+    get_cashflow_akshare,
+    get_income_statement_akshare,
+    get_news_akshare,
+    get_indicators_akshare,
+)
 from .alpha_vantage import (
     get_stock as get_alpha_vantage_stock,
     get_indicator as get_alpha_vantage_indicator,
@@ -57,8 +73,11 @@ TOOLS_CATEGORIES = {
 VENDOR_LIST = [
     "local",
     "yfinance",
+    "alpha_vantage",
     "openai",
-    "google"
+    "google",
+    "tushare",
+    "akshare",
 ]
 
 # Mapping of methods to their vendor-specific implementations
@@ -67,10 +86,13 @@ VENDOR_METHODS = {
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
+        "tushare": get_stock_data_tushare,
+        "akshare": get_stock_data_akshare,
         "local": get_YFin_data,
     },
     # technical_indicators
     "get_indicators": {
+        "akshare": get_indicators_akshare,
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
         "local": get_stock_stats_indicators_window
@@ -79,30 +101,40 @@ VENDOR_METHODS = {
     "get_fundamentals": {
         "alpha_vantage": get_alpha_vantage_fundamentals,
         "openai": get_fundamentals_openai,
+        "tushare": get_fundamentals_tushare,
+        "akshare": get_fundamentals_akshare,
     },
     "get_balance_sheet": {
         "alpha_vantage": get_alpha_vantage_balance_sheet,
         "yfinance": get_yfinance_balance_sheet,
+        "tushare": get_balance_sheet_tushare,
+        "akshare": get_balance_sheet_akshare,
         "local": get_simfin_balance_sheet,
     },
     "get_cashflow": {
         "alpha_vantage": get_alpha_vantage_cashflow,
         "yfinance": get_yfinance_cashflow,
+        "tushare": get_cashflow_tushare,
+        "akshare": get_cashflow_akshare,
         "local": get_simfin_cashflow,
     },
     "get_income_statement": {
         "alpha_vantage": get_alpha_vantage_income_statement,
         "yfinance": get_yfinance_income_statement,
+        "tushare": get_income_statement_tushare,
+        "akshare": get_income_statement_akshare,
         "local": get_simfin_income_statements,
     },
     # news_data
     "get_news": {
+        "google": get_news_google,
+        "akshare": get_news_akshare,
         "alpha_vantage": get_alpha_vantage_news,
         "openai": get_stock_news_openai,
-        "google": get_google_news,
-        "local": [get_finnhub_news, get_reddit_company_news, get_google_news],
+        "local": [get_finnhub_news, get_reddit_company_news, get_news_google],
     },
     "get_global_news": {
+        "google": get_global_news_google,
         "openai": get_global_news_openai,
         "local": get_reddit_global_news
     },
@@ -200,6 +232,10 @@ def route_to_vendor(method: str, *args, **kwargs):
             try:
                 print(f"DEBUG: Calling {impl_func.__name__} from vendor '{vendor_name}'...")
                 result = impl_func(*args, **kwargs)
+                if result is None:
+                    continue
+                if isinstance(result, str) and not result.strip():
+                    continue
                 vendor_results.append(result)
                 print(f"SUCCESS: {impl_func.__name__} from vendor '{vendor_name}' completed successfully")
                     

@@ -1,6 +1,9 @@
 typing-extensions
+python-dotenv
 langchain-openai
 langchain-experimental
+langchain-core
+openai
 pandas
 yfinance
 praw
@@ -22,5 +25,6 @@ redis
 chainlit
 rich
 questionary
+typer
 langchain_anthropic
 langchain-google-genai

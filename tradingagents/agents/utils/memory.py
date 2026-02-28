@@ -1,25 +1,47 @@
 import chromadb
 from chromadb.config import Settings
 from openai import OpenAI
+import hashlib
 
 
 class FinancialSituationMemory:
     def __init__(self, name, config):
-        if config["backend_url"] == "http://localhost:11434/v1":
-            self.embedding = "nomic-embed-text"
+        embedding_backend_url = config.get("embedding_backend_url") or config["backend_url"]
+        embedding_mode = config.get("embedding_mode")
+        if embedding_mode is None:
+            if embedding_backend_url == "http://localhost:11434/v1":
+                embedding_mode = "remote"
+            elif embedding_backend_url.startswith("https://api.openai.com/"):
+                embedding_mode = "remote"
+            else:
+                embedding_mode = "local_hash"
+
+        self.embedding_mode = embedding_mode
+        if embedding_backend_url == "http://localhost:11434/v1":
+            self.embedding = config.get("embedding_model") or "nomic-embed-text"
         else:
-            self.embedding = "text-embedding-3-small"
-        self.client = OpenAI(base_url=config["backend_url"])
+            self.embedding = config.get("embedding_model") or "text-embedding-3-small"
+
+        self.client = None
+        if self.embedding_mode == "remote":
+            self.client = OpenAI(base_url=embedding_backend_url)
         self.chroma_client = chromadb.Client(Settings(allow_reset=True))
         self.situation_collection = self.chroma_client.create_collection(name=name)
 
     def get_embedding(self, text):
-        """Get OpenAI embedding for a text"""
-        
-        response = self.client.embeddings.create(
-            model=self.embedding, input=text
-        )
-        return response.data[0].embedding
+        if self.embedding_mode == "remote" and self.client is not None:
+            try:
+                response = self.client.embeddings.create(model=self.embedding, input=text)
+                return response.data[0].embedding
+            except Exception:
+                pass
+
+        dims = 256
+        out: list[float] = []
+        for i in range(dims // 32):
+            digest = hashlib.sha256((str(i) + "\n" + text).encode("utf-8")).digest()
+            out.extend([(b / 127.5) - 1.0 for b in digest])
+        return out[:dims]
 
     def add_situations(self, situations_and_advice):
         """Add financial situations and their corresponding advice. Parameter is a list of tuples (situation, rec)"""

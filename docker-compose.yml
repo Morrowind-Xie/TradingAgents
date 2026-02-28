@@ -1,0 +1,13 @@
+services:
+  tradingagents:
+    build: .
+    env_file:
+      - .env
+    environment:
+      TRADINGAGENTS_RESULTS_DIR: /app/results
+      TRADINGAGENTS_DATA_DIR: /app/data
+    volumes:
+      - ./results:/app/results
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

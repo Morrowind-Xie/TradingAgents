@@ -8,6 +8,14 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+import os
+
+openai_api_key = os.getenv("OPENAI_API_KEY", "")
+if (not openai_api_key) or ("placeholder" in openai_api_key.lower()):
+    if os.getenv("DEEPSEEK_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = os.environ["DEEPSEEK_API_KEY"]
+    elif os.getenv("OPENROUTER_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
 from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.live import Live
@@ -474,6 +482,9 @@ def get_user_selections():
         )
     )
     selected_llm_provider, backend_url = select_llm_provider()
+    llm_provider = selected_llm_provider.lower()
+    if llm_provider == "deepseek":
+        llm_provider = "openai"
     
     # Step 6: Thinking agents
     console.print(
@@ -489,7 +500,7 @@ def get_user_selections():
         "analysis_date": analysis_date,
         "analysts": selected_analysts,
         "research_depth": selected_research_depth,
-        "llm_provider": selected_llm_provider.lower(),
+        "llm_provider": llm_provider,
         "backend_url": backend_url,
         "shallow_thinker": selected_shallow_thinker,
         "deep_thinker": selected_deep_thinker,
