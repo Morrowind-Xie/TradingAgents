@@ -1,97 +1,106 @@
-import chromadb
-from chromadb.config import Settings
-from openai import OpenAI
-import hashlib
+"""Financial situation memory using BM25 for lexical similarity matching.
+
+Uses BM25 (Best Matching 25) algorithm for retrieval - no API calls,
+no token limits, works offline with any LLM provider.
+"""
+
+from rank_bm25 import BM25Okapi
+from typing import List, Tuple
+import re
 
 
 class FinancialSituationMemory:
-    def __init__(self, name, config):
-        embedding_backend_url = config.get("embedding_backend_url") or config["backend_url"]
-        embedding_mode = config.get("embedding_mode")
-        if embedding_mode is None:
-            if embedding_backend_url == "http://localhost:11434/v1":
-                embedding_mode = "remote"
-            elif embedding_backend_url.startswith("https://api.openai.com/"):
-                embedding_mode = "remote"
-            else:
-                embedding_mode = "local_hash"
+    """Memory system for storing and retrieving financial situations using BM25."""
 
-        self.embedding_mode = embedding_mode
-        if embedding_backend_url == "http://localhost:11434/v1":
-            self.embedding = config.get("embedding_model") or "nomic-embed-text"
+    def __init__(self, name: str, config: dict = None):
+        """Initialize the memory system.
+
+        Args:
+            name: Name identifier for this memory instance
+            config: Configuration dict (kept for API compatibility, not used for BM25)
+        """
+        self.name = name
+        self.documents: List[str] = []
+        self.recommendations: List[str] = []
+        self.bm25 = None
+
+    def _tokenize(self, text: str) -> List[str]:
+        """Tokenize text for BM25 indexing.
+
+        Simple whitespace + punctuation tokenization with lowercasing.
+        """
+        # Lowercase and split on non-alphanumeric characters
+        tokens = re.findall(r'\b\w+\b', text.lower())
+        return tokens
+
+    def _rebuild_index(self):
+        """Rebuild the BM25 index after adding documents."""
+        if self.documents:
+            tokenized_docs = [self._tokenize(doc) for doc in self.documents]
+            self.bm25 = BM25Okapi(tokenized_docs)
         else:
-            self.embedding = config.get("embedding_model") or "text-embedding-3-small"
+            self.bm25 = None
 
-        self.client = None
-        if self.embedding_mode == "remote":
-            self.client = OpenAI(base_url=embedding_backend_url)
-        self.chroma_client = chromadb.Client(Settings(allow_reset=True))
-        self.situation_collection = self.chroma_client.create_collection(name=name)
+    def add_situations(self, situations_and_advice: List[Tuple[str, str]]):
+        """Add financial situations and their corresponding advice.
 
-    def get_embedding(self, text):
-        if self.embedding_mode == "remote" and self.client is not None:
-            try:
-                response = self.client.embeddings.create(model=self.embedding, input=text)
-                return response.data[0].embedding
-            except Exception:
-                pass
+        Args:
+            situations_and_advice: List of tuples (situation, recommendation)
+        """
+        for situation, recommendation in situations_and_advice:
+            self.documents.append(situation)
+            self.recommendations.append(recommendation)
 
-        dims = 256
-        out: list[float] = []
-        for i in range(dims // 32):
-            digest = hashlib.sha256((str(i) + "\n" + text).encode("utf-8")).digest()
-            out.extend([(b / 127.5) - 1.0 for b in digest])
-        return out[:dims]
+        # Rebuild BM25 index with new documents
+        self._rebuild_index()
 
-    def add_situations(self, situations_and_advice):
-        """Add financial situations and their corresponding advice. Parameter is a list of tuples (situation, rec)"""
+    def get_memories(self, current_situation: str, n_matches: int = 1) -> List[dict]:
+        """Find matching recommendations using BM25 similarity.
 
-        situations = []
-        advice = []
-        ids = []
-        embeddings = []
+        Args:
+            current_situation: The current financial situation to match against
+            n_matches: Number of top matches to return
 
-        offset = self.situation_collection.count()
+        Returns:
+            List of dicts with matched_situation, recommendation, and similarity_score
+        """
+        if not self.documents or self.bm25 is None:
+            return []
 
-        for i, (situation, recommendation) in enumerate(situations_and_advice):
-            situations.append(situation)
-            advice.append(recommendation)
-            ids.append(str(offset + i))
-            embeddings.append(self.get_embedding(situation))
+        # Tokenize query
+        query_tokens = self._tokenize(current_situation)
 
-        self.situation_collection.add(
-            documents=situations,
-            metadatas=[{"recommendation": rec} for rec in advice],
-            embeddings=embeddings,
-            ids=ids,
-        )
+        # Get BM25 scores for all documents
+        scores = self.bm25.get_scores(query_tokens)
 
-    def get_memories(self, current_situation, n_matches=1):
-        """Find matching recommendations using OpenAI embeddings"""
-        query_embedding = self.get_embedding(current_situation)
+        # Get top-n indices sorted by score (descending)
+        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:n_matches]
 
-        results = self.situation_collection.query(
-            query_embeddings=[query_embedding],
-            n_results=n_matches,
-            include=["metadatas", "documents", "distances"],
-        )
+        # Build results
+        results = []
+        max_score = max(scores) if max(scores) > 0 else 1  # Normalize scores
 
-        matched_results = []
-        for i in range(len(results["documents"][0])):
-            matched_results.append(
-                {
-                    "matched_situation": results["documents"][0][i],
-                    "recommendation": results["metadatas"][0][i]["recommendation"],
-                    "similarity_score": 1 - results["distances"][0][i],
-                }
-            )
+        for idx in top_indices:
+            # Normalize score to 0-1 range for consistency
+            normalized_score = scores[idx] / max_score if max_score > 0 else 0
+            results.append({
+                "matched_situation": self.documents[idx],
+                "recommendation": self.recommendations[idx],
+                "similarity_score": normalized_score,
+            })
 
-        return matched_results
+        return results
+
+    def clear(self):
+        """Clear all stored memories."""
+        self.documents = []
+        self.recommendations = []
+        self.bm25 = None
 
 
 if __name__ == "__main__":
     # Example usage
-    matcher = FinancialSituationMemory()
+    matcher = FinancialSituationMemory("test_memory")
 
     # Example data
     example_data = [
@@ -118,7 +127,7 @@ if __name__ == "__main__":
 
     # Example query
     current_situation = """
-    Market showing increased volatility in tech sector, with institutional investors 
+    Market showing increased volatility in tech sector, with institutional investors
     reducing positions and rising interest rates affecting growth stock valuations
     """
 

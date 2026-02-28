@@ -23,14 +23,13 @@ config["quick_think_llm"] = "deepseek-chat"
 config["max_debate_rounds"] = 1
 
 # Configure data vendors
+# For A-share (Chinese market): use akshare/tushare
+# For US market: use yfinance or alpha_vantage
 config["data_vendors"] = {
     "core_stock_apis": "akshare,yfinance",
     "technical_indicators": "akshare,yfinance",
     "fundamental_data": "akshare",
     "news_data": "akshare",
-}
-config["tool_vendors"] = {
-    "get_global_news": "google",
 }
 
 # Initialize with custom config
