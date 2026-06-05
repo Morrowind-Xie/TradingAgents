@@ -22,10 +22,10 @@ DEFAULT_CONFIG = {
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {
-        "core_stock_apis": os.getenv("TRADINGAGENTS_CORE_STOCK_APIS_VENDOR", "yfinance"),
-        "technical_indicators": os.getenv("TRADINGAGENTS_TECHNICAL_INDICATORS_VENDOR", "yfinance"),
-        "fundamental_data": os.getenv("TRADINGAGENTS_FUNDAMENTAL_DATA_VENDOR", "yfinance"),
-        "news_data": os.getenv("TRADINGAGENTS_NEWS_DATA_VENDOR", "yfinance"),
+        "core_stock_apis": os.getenv("TRADINGAGENTS_CORE_STOCK_APIS_VENDOR", "tdx,akshare"),
+        "technical_indicators": os.getenv("TRADINGAGENTS_TECHNICAL_INDICATORS_VENDOR", "tdx,akshare"),
+        "fundamental_data": os.getenv("TRADINGAGENTS_FUNDAMENTAL_DATA_VENDOR", "tdx,akshare"),
+        "news_data": os.getenv("TRADINGAGENTS_NEWS_DATA_VENDOR", "akshare"),
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

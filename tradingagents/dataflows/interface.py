@@ -28,6 +28,15 @@ from .akshare_cn import (
     get_news_akshare,
     get_indicators_akshare,
 )
+from .tdx_cn import (
+    get_stock_data_tdx,
+    get_fundamentals_tdx,
+    get_balance_sheet_tdx,
+    get_cashflow_tdx,
+    get_income_statement_tdx,
+    get_news_tdx,
+    get_indicators_tdx,
+)
 from .alpha_vantage import (
     get_stock as get_alpha_vantage_stock,
     get_indicator as get_alpha_vantage_indicator,
@@ -83,6 +92,7 @@ VENDOR_LIST = [
     "google",
     "tushare",
     "akshare",
+    "tdx",
 ]
 
 # Mapping of methods to their vendor-specific implementations
@@ -93,12 +103,14 @@ VENDOR_METHODS = {
         "yfinance": get_YFin_data_online,
         "tushare": get_stock_data_tushare,
         "akshare": get_stock_data_akshare,
+        "tdx": get_stock_data_tdx,
     },
     # technical_indicators
     "get_indicators": {
         "akshare": get_indicators_akshare,
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
+        "tdx": get_indicators_tdx,
     },
     # fundamental_data
     "get_fundamentals": {
@@ -106,24 +118,28 @@ VENDOR_METHODS = {
         "yfinance": get_yfinance_fundamentals,
         "tushare": get_fundamentals_tushare,
         "akshare": get_fundamentals_akshare,
+        "tdx": get_fundamentals_tdx,
     },
     "get_balance_sheet": {
         "alpha_vantage": get_alpha_vantage_balance_sheet,
         "yfinance": get_yfinance_balance_sheet,
         "tushare": get_balance_sheet_tushare,
         "akshare": get_balance_sheet_akshare,
+        "tdx": get_balance_sheet_tdx,
     },
     "get_cashflow": {
         "alpha_vantage": get_alpha_vantage_cashflow,
         "yfinance": get_yfinance_cashflow,
         "tushare": get_cashflow_tushare,
         "akshare": get_cashflow_akshare,
+        "tdx": get_cashflow_tdx,
     },
     "get_income_statement": {
         "alpha_vantage": get_alpha_vantage_income_statement,
         "yfinance": get_yfinance_income_statement,
         "tushare": get_income_statement_tushare,
         "akshare": get_income_statement_akshare,
+        "tdx": get_income_statement_tdx,
     },
     # news_data
     "get_news": {
@@ -131,6 +147,7 @@ VENDOR_METHODS = {
         "akshare": get_news_akshare,
         "alpha_vantage": get_alpha_vantage_news,
         "yfinance": get_news_yfinance,
+        "tdx": get_news_tdx,
     },
     "get_global_news": {
         "google": get_global_news_google,
