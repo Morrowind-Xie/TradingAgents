@@ -1,42 +1,18 @@
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
 
-import os
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
-
-openai_api_key = os.getenv("OPENAI_API_KEY", "")
-if (not openai_api_key) or ("placeholder" in openai_api_key.lower()):
-    if os.getenv("DEEPSEEK_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = os.environ["DEEPSEEK_API_KEY"]
-    elif os.getenv("OPENROUTER_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
-
-# Create a custom config
+# DEFAULT_CONFIG already applies TRADINGAGENTS_* env-var overrides
+# (llm_provider, deep_think_llm, quick_think_llm, backend_url, etc.),
+# so users can switch models or endpoints purely via .env without
+# editing this script. Override individual keys here only when you
+# want a hard-coded value that should ignore the environment.
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"
-config["backend_url"] = "https://api.deepseek.com/v1"
-config["deep_think_llm"] = "deepseek-chat"
-config["quick_think_llm"] = "deepseek-chat"
-config["max_debate_rounds"] = 1
-
-# Configure data vendors
-# For A-share (Chinese market): use akshare/tushare
-# For US market: use yfinance or alpha_vantage
-config["data_vendors"] = {
-    "core_stock_apis": "akshare,yfinance",
-    "technical_indicators": "akshare,yfinance",
-    "fundamental_data": "akshare",
-    "news_data": "akshare",
-}
 
 # Initialize with custom config
 ta = TradingAgentsGraph(debug=True, config=config)
 
 # forward propagate
-_, decision = ta.propagate("600519.SH", "2024-05-10")
+_, decision = ta.propagate("NVDA", "2024-05-10")
 print(decision)
 
 # Memorize mistakes and reflect

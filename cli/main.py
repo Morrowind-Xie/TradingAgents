@@ -1,21 +1,11 @@
 from typing import Optional
+import os
 import datetime
 import typer
+import questionary
 from pathlib import Path
 from functools import wraps
 from rich.console import Console
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
-import os
-
-openai_api_key = os.getenv("OPENAI_API_KEY", "")
-if (not openai_api_key) or ("placeholder" in openai_api_key.lower()):
-    if os.getenv("DEEPSEEK_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = os.environ["DEEPSEEK_API_KEY"]
-    elif os.getenv("OPENROUTER_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
 from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.live import Live
@@ -32,6 +22,12 @@ from rich.align import Align
 from rich.rule import Rule
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.graph.analyst_execution import (
+    AnalystWallTimeTracker,
+    build_analyst_execution_plan,
+    get_initial_analyst_node,
+    sync_analyst_tracker_from_chunk,
+)
 from tradingagents.default_config import DEFAULT_CONFIG
 from cli.models import AnalystType
 from cli.utils import *
@@ -60,7 +56,7 @@ class MessageBuffer:
     # Analyst name mapping
     ANALYST_MAPPING = {
         "market": "Market Analyst",
-        "social": "Social Analyst",
+        "social": "Sentiment Analyst",
         "news": "News Analyst",
         "fundamentals": "Fundamentals Analyst",
     }
@@ -70,7 +66,7 @@ class MessageBuffer:
     # finalizing_agent: which agent must be "completed" for this report to count as done
     REPORT_SECTIONS = {
         "market_report": ("market", "Market Analyst"),
-        "sentiment_report": ("social", "Social Analyst"),
+        "sentiment_report": ("social", "Sentiment Analyst"),
         "news_report": ("news", "News Analyst"),
         "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
         "investment_plan": (None, "Research Manager"),
@@ -87,7 +83,7 @@ class MessageBuffer:
         self.current_agent = None
         self.report_sections = {}
         self.selected_analysts = []
-        self._last_message_id = None
+        self._processed_message_ids = set()
 
     def init_for_analysis(self, selected_analysts):
         """Initialize agent status and report sections based on selected analysts.
@@ -122,7 +118,7 @@ class MessageBuffer:
         self.current_agent = None
         self.messages.clear()
         self.tool_calls.clear()
-        self._last_message_id = None
+        self._processed_message_ids.clear()
 
     def get_completed_reports_count(self):
         """Count reports that are finalized (their finalizing agent is completed).
@@ -291,7 +287,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     all_teams = {
         "Analyst Team": [
             "Market Analyst",
-            "Social Analyst",
+            "Sentiment Analyst",
             "News Analyst",
             "Fundamentals Analyst",
         ],
@@ -470,7 +466,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
 def get_user_selections():
     """Get all user selections before starting the analysis display."""
     # Display ASCII art welcome message
-    with open("./cli/static/welcome.txt", "r") as f:
+    with open(Path(__file__).parent / "static" / "welcome.txt", "r", encoding="utf-8") as f:
         welcome_ascii = f.read()
 
     # Create welcome box content
@@ -509,10 +505,19 @@ def get_user_selections():
     # Step 1: Ticker symbol
     console.print(
         create_question_box(
-            "Step 1: Ticker Symbol", "Enter the ticker symbol to analyze", "SPY"
+            "Step 1: Ticker Symbol",
+            "Enter the ticker, with exchange suffix when needed (e.g. SPY, 0700.HK, BTC-USD)",
+            "SPY",
         )
     )
     selected_ticker = get_ticker()
+    asset_type = detect_asset_type(selected_ticker)
+    # Only announce when it's not the default stock path, to avoid printing
+    # "stock" on every run.
+    if asset_type.value != "stock":
+        console.print(
+            f"[green]Detected asset type:[/green] {asset_type.value}"
+        )
 
     # Step 2: Analysis date
     default_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -525,54 +530,114 @@ def get_user_selections():
     )
     analysis_date = get_analysis_date()
 
-    # Step 3: Select analysts
+    # Step 3: Output language (skipped when set via TRADINGAGENTS_OUTPUT_LANGUAGE)
+    if os.environ.get("TRADINGAGENTS_OUTPUT_LANGUAGE"):
+        output_language = DEFAULT_CONFIG["output_language"]
+        console.print(
+            f"[green]✓ Output language from environment:[/green] {output_language}"
+        )
+    else:
+        console.print(
+            create_question_box(
+                "Step 3: Output Language",
+                "Select the language for analyst reports and final decision"
+            )
+        )
+        output_language = ask_output_language()
+
+    # Step 4: Select analysts
     console.print(
         create_question_box(
-            "Step 3: Analysts Team", "Select your LLM analyst agents for the analysis"
+            "Step 4: Analysts Team", "Select your LLM analyst agents for the analysis"
         )
     )
-    selected_analysts = select_analysts()
+    selected_analysts = select_analysts(asset_type)
     console.print(
         f"[green]Selected analysts:[/green] {', '.join(analyst.value for analyst in selected_analysts)}"
     )
 
-    # Step 4: Research depth
+    # Step 5: Research depth
     console.print(
         create_question_box(
-            "Step 4: Research Depth", "Select your research depth level"
+            "Step 5: Research Depth", "Select your research depth level"
         )
     )
     selected_research_depth = select_research_depth()
 
-    # Step 5: OpenAI backend
-    console.print(
-        create_question_box(
-            "Step 5: OpenAI backend", "Select which service to talk to"
-        )
-    )
-    selected_llm_provider, backend_url = select_llm_provider()
-    llm_provider = selected_llm_provider.lower()
-    if llm_provider == "deepseek":
-        llm_provider = "openai"
-    
-    # Step 6: Thinking agents
-    console.print(
-        create_question_box(
-            "Step 6: Thinking Agents", "Select your thinking agents for analysis"
-        )
-    )
-    selected_shallow_thinker = select_shallow_thinking_agent(selected_llm_provider)
-    selected_deep_thinker = select_deep_thinking_agent(selected_llm_provider)
-
-    # Step 7: Provider-specific thinking configuration
-    thinking_level = None
-    reasoning_effort = None
-
-    provider_lower = selected_llm_provider.lower()
-    if provider_lower == "google":
+    # Step 6: LLM Provider (skipped when set via TRADINGAGENTS_LLM_PROVIDER).
+    # The backend URL comes from TRADINGAGENTS_LLM_BACKEND_URL when set,
+    # otherwise the provider's default endpoint — the same value the menu
+    # would have picked.
+    provider_from_env = bool(os.environ.get("TRADINGAGENTS_LLM_PROVIDER"))
+    if provider_from_env:
+        selected_llm_provider = DEFAULT_CONFIG["llm_provider"].lower()
+        backend_url = DEFAULT_CONFIG["backend_url"] or provider_default_url(selected_llm_provider)
+        console.print(f"[green]✓ LLM provider from environment:[/green] {selected_llm_provider}")
+        console.print(f"[green]✓ Backend URL:[/green] {backend_url}")
+        # Still confirm/persist the API key so the run doesn't fail later.
+        ensure_api_key(selected_llm_provider)
+    else:
         console.print(
             create_question_box(
-                "Step 7: Thinking Mode",
+                "Step 6: LLM Provider", "Select your LLM provider"
+            )
+        )
+        selected_llm_provider, backend_url = select_llm_provider()
+
+        # Providers with regional endpoints prompt for the region as a secondary
+        # step so the main dropdown stays clean (mainland China and international
+        # accounts cannot share API keys).
+        if selected_llm_provider == "qwen":
+            selected_llm_provider, backend_url = ask_qwen_region()
+        elif selected_llm_provider == "minimax":
+            selected_llm_provider, backend_url = ask_minimax_region()
+        elif selected_llm_provider == "glm":
+            selected_llm_provider, backend_url = ask_glm_region()
+
+        # For Ollama, surface the resolved endpoint (OLLAMA_BASE_URL vs default)
+        # before model selection so it's obvious where we're connecting.
+        if selected_llm_provider == "ollama":
+            confirm_ollama_endpoint(backend_url)
+
+        # Confirm the provider's API key is present; prompt the user to paste
+        # one and persist it to .env if it's missing, so the analysis run
+        # doesn't fail later at the first API call.
+        ensure_api_key(selected_llm_provider)
+
+    # Step 7: Thinking agents (skipped when either model is set via environment)
+    if os.environ.get("TRADINGAGENTS_QUICK_THINK_LLM") or os.environ.get("TRADINGAGENTS_DEEP_THINK_LLM"):
+        selected_shallow_thinker = DEFAULT_CONFIG["quick_think_llm"]
+        selected_deep_thinker = DEFAULT_CONFIG["deep_think_llm"]
+        console.print(
+            f"[green]✓ Thinking agents from environment:[/green] "
+            f"quick={selected_shallow_thinker}, deep={selected_deep_thinker}"
+        )
+    else:
+        console.print(
+            create_question_box(
+                "Step 7: Thinking Agents", "Select your thinking agents for analysis"
+            )
+        )
+        selected_shallow_thinker = select_shallow_thinking_agent(selected_llm_provider)
+        selected_deep_thinker = select_deep_thinking_agent(selected_llm_provider)
+
+    # Step 8: Provider-specific thinking configuration
+    thinking_level = None
+    reasoning_effort = None
+    anthropic_effort = None
+
+    provider_lower = selected_llm_provider.lower()
+    # When the provider is configured via environment we keep the run fully
+    # non-interactive and use the config defaults (None = each provider's own
+    # default reasoning/thinking behavior) instead of prompting.
+    if provider_from_env:
+        thinking_level = DEFAULT_CONFIG["google_thinking_level"]
+        reasoning_effort = DEFAULT_CONFIG["openai_reasoning_effort"]
+        anthropic_effort = DEFAULT_CONFIG["anthropic_effort"]
+    elif provider_lower == "google":
+        console.print(
+            create_question_box(
+                "Step 8: Thinking Mode",
                 "Configure Gemini thinking mode"
             )
         )
@@ -580,29 +645,35 @@ def get_user_selections():
     elif provider_lower == "openai":
         console.print(
             create_question_box(
-                "Step 7: Reasoning Effort",
+                "Step 8: Reasoning Effort",
                 "Configure OpenAI reasoning effort level"
             )
         )
         reasoning_effort = ask_openai_reasoning_effort()
+    elif provider_lower == "anthropic":
+        console.print(
+            create_question_box(
+                "Step 8: Effort Level",
+                "Configure Claude effort level"
+            )
+        )
+        anthropic_effort = ask_anthropic_effort()
 
     return {
         "ticker": selected_ticker,
+        "asset_type": asset_type.value,
         "analysis_date": analysis_date,
         "analysts": selected_analysts,
         "research_depth": selected_research_depth,
-        "llm_provider": llm_provider,
+        "llm_provider": selected_llm_provider.lower(),
         "backend_url": backend_url,
         "shallow_thinker": selected_shallow_thinker,
         "deep_thinker": selected_deep_thinker,
         "google_thinking_level": thinking_level,
         "openai_reasoning_effort": reasoning_effort,
+        "anthropic_effort": anthropic_effort,
+        "output_language": output_language,
     }
-
-
-def get_ticker():
-    """Get ticker symbol from user input."""
-    return typer.prompt("", default="SPY")
 
 
 def get_analysis_date():
@@ -634,19 +705,19 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
     analyst_parts = []
     if final_state.get("market_report"):
         analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "market.md").write_text(final_state["market_report"])
+        (analysts_dir / "market.md").write_text(final_state["market_report"], encoding="utf-8")
         analyst_parts.append(("Market Analyst", final_state["market_report"]))
     if final_state.get("sentiment_report"):
         analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "sentiment.md").write_text(final_state["sentiment_report"])
-        analyst_parts.append(("Social Analyst", final_state["sentiment_report"]))
+        (analysts_dir / "sentiment.md").write_text(final_state["sentiment_report"], encoding="utf-8")
+        analyst_parts.append(("Sentiment Analyst", final_state["sentiment_report"]))
     if final_state.get("news_report"):
         analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "news.md").write_text(final_state["news_report"])
+        (analysts_dir / "news.md").write_text(final_state["news_report"], encoding="utf-8")
         analyst_parts.append(("News Analyst", final_state["news_report"]))
     if final_state.get("fundamentals_report"):
         analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "fundamentals.md").write_text(final_state["fundamentals_report"])
+        (analysts_dir / "fundamentals.md").write_text(final_state["fundamentals_report"], encoding="utf-8")
         analyst_parts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
     if analyst_parts:
         content = "\n\n".join(f"### {name}\n{text}" for name, text in analyst_parts)
@@ -659,15 +730,15 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
         research_parts = []
         if debate.get("bull_history"):
             research_dir.mkdir(exist_ok=True)
-            (research_dir / "bull.md").write_text(debate["bull_history"])
+            (research_dir / "bull.md").write_text(debate["bull_history"], encoding="utf-8")
             research_parts.append(("Bull Researcher", debate["bull_history"]))
         if debate.get("bear_history"):
             research_dir.mkdir(exist_ok=True)
-            (research_dir / "bear.md").write_text(debate["bear_history"])
+            (research_dir / "bear.md").write_text(debate["bear_history"], encoding="utf-8")
             research_parts.append(("Bear Researcher", debate["bear_history"]))
         if debate.get("judge_decision"):
             research_dir.mkdir(exist_ok=True)
-            (research_dir / "manager.md").write_text(debate["judge_decision"])
+            (research_dir / "manager.md").write_text(debate["judge_decision"], encoding="utf-8")
             research_parts.append(("Research Manager", debate["judge_decision"]))
         if research_parts:
             content = "\n\n".join(f"### {name}\n{text}" for name, text in research_parts)
@@ -677,7 +748,7 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
     if final_state.get("trader_investment_plan"):
         trading_dir = save_path / "3_trading"
         trading_dir.mkdir(exist_ok=True)
-        (trading_dir / "trader.md").write_text(final_state["trader_investment_plan"])
+        (trading_dir / "trader.md").write_text(final_state["trader_investment_plan"], encoding="utf-8")
         sections.append(f"## III. Trading Team Plan\n\n### Trader\n{final_state['trader_investment_plan']}")
 
     # 4. Risk Management
@@ -687,15 +758,15 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
         risk_parts = []
         if risk.get("aggressive_history"):
             risk_dir.mkdir(exist_ok=True)
-            (risk_dir / "aggressive.md").write_text(risk["aggressive_history"])
+            (risk_dir / "aggressive.md").write_text(risk["aggressive_history"], encoding="utf-8")
             risk_parts.append(("Aggressive Analyst", risk["aggressive_history"]))
         if risk.get("conservative_history"):
             risk_dir.mkdir(exist_ok=True)
-            (risk_dir / "conservative.md").write_text(risk["conservative_history"])
+            (risk_dir / "conservative.md").write_text(risk["conservative_history"], encoding="utf-8")
             risk_parts.append(("Conservative Analyst", risk["conservative_history"]))
         if risk.get("neutral_history"):
             risk_dir.mkdir(exist_ok=True)
-            (risk_dir / "neutral.md").write_text(risk["neutral_history"])
+            (risk_dir / "neutral.md").write_text(risk["neutral_history"], encoding="utf-8")
             risk_parts.append(("Neutral Analyst", risk["neutral_history"]))
         if risk_parts:
             content = "\n\n".join(f"### {name}\n{text}" for name, text in risk_parts)
@@ -705,12 +776,12 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
         if risk.get("judge_decision"):
             portfolio_dir = save_path / "5_portfolio"
             portfolio_dir.mkdir(exist_ok=True)
-            (portfolio_dir / "decision.md").write_text(risk["judge_decision"])
+            (portfolio_dir / "decision.md").write_text(risk["judge_decision"], encoding="utf-8")
             sections.append(f"## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{risk['judge_decision']}")
 
     # Write consolidated report
     header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    (save_path / "complete_report.md").write_text(header + "\n\n".join(sections))
+    (save_path / "complete_report.md").write_text(header + "\n\n".join(sections), encoding="utf-8")
     return save_path / "complete_report.md"
 
 
@@ -724,7 +795,7 @@ def display_complete_report(final_state):
     if final_state.get("market_report"):
         analysts.append(("Market Analyst", final_state["market_report"]))
     if final_state.get("sentiment_report"):
-        analysts.append(("Social Analyst", final_state["sentiment_report"]))
+        analysts.append(("Sentiment Analyst", final_state["sentiment_report"]))
     if final_state.get("news_report"):
         analysts.append(("News Analyst", final_state["news_report"]))
     if final_state.get("fundamentals_report"):
@@ -786,7 +857,7 @@ def update_research_team_status(status):
 ANALYST_ORDER = ["market", "social", "news", "fundamentals"]
 ANALYST_AGENT_NAMES = {
     "market": "Market Analyst",
-    "social": "Social Analyst",
+    "social": "Sentiment Analyst",
     "news": "News Analyst",
     "fundamentals": "Fundamentals Analyst",
 }
@@ -798,10 +869,12 @@ ANALYST_REPORT_MAP = {
 }
 
 
-def update_analyst_statuses(message_buffer, chunk):
-    """Update all analyst statuses based on current report state.
+def update_analyst_statuses(message_buffer, chunk, wall_time_tracker=None):
+    """Update analyst statuses based on accumulated report state.
 
     Logic:
+    - Store new report content from the current chunk if present
+    - Check accumulated report_sections (not just current chunk) for status
     - Analysts with reports = completed
     - First analyst without report = in_progress
     - Remaining analysts without reports = pending
@@ -810,17 +883,25 @@ def update_analyst_statuses(message_buffer, chunk):
     selected = message_buffer.selected_analysts
     found_active = False
 
+    if wall_time_tracker is not None:
+        sync_analyst_tracker_from_chunk(wall_time_tracker, chunk)
+
     for analyst_key in ANALYST_ORDER:
         if analyst_key not in selected:
             continue
 
         agent_name = ANALYST_AGENT_NAMES[analyst_key]
         report_key = ANALYST_REPORT_MAP[analyst_key]
-        has_report = bool(chunk.get(report_key))
+
+        # Capture new report content from current chunk
+        if chunk.get(report_key):
+            message_buffer.update_report_section(report_key, chunk[report_key])
+
+        # Determine status from accumulated sections, not just current chunk
+        has_report = bool(message_buffer.report_sections.get(report_key))
 
         if has_report:
             message_buffer.update_agent_status(agent_name, "completed")
-            message_buffer.update_report_section(report_key, chunk[report_key])
         elif not found_active:
             message_buffer.update_agent_status(agent_name, "in_progress")
             found_active = True
@@ -907,7 +988,7 @@ def format_tool_args(args, max_length=80) -> str:
         return result[:max_length - 3] + "..."
     return result
 
-def run_analysis():
+def run_analysis(checkpoint: bool = False):
     # First get all user selections
     selections = get_user_selections()
 
@@ -922,6 +1003,9 @@ def run_analysis():
     # Provider-specific thinking configuration
     config["google_thinking_level"] = selections.get("google_thinking_level")
     config["openai_reasoning_effort"] = selections.get("openai_reasoning_effort")
+    config["anthropic_effort"] = selections.get("anthropic_effort")
+    config["output_language"] = selections.get("output_language", "English")
+    config["checkpoint_enabled"] = checkpoint
 
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()
@@ -929,6 +1013,11 @@ def run_analysis():
     # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
     selected_set = {analyst.value for analyst in selections["analysts"]}
     selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
+    analyst_execution_plan = build_analyst_execution_plan(
+        selected_analyst_keys,
+        concurrency_limit=config["analyst_concurrency_limit"],
+    )
+    analyst_wall_time_tracker = AnalystWallTimeTracker(analyst_execution_plan)
 
     # Initialize the graph with callbacks bound to LLMs
     graph = TradingAgentsGraph(
@@ -959,7 +1048,7 @@ def run_analysis():
             func(*args, **kwargs)
             timestamp, message_type, content = obj.messages[-1]
             content = content.replace("\n", " ")  # Replace newlines with spaces
-            with open(log_file, "a") as f:
+            with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"{timestamp} [{message_type}] {content}\n")
         return wrapper
     
@@ -970,7 +1059,7 @@ def run_analysis():
             func(*args, **kwargs)
             timestamp, tool_name, args = obj.tool_calls[-1]
             args_str = ", ".join(f"{k}={v}" for k, v in args.items())
-            with open(log_file, "a") as f:
+            with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"{timestamp} [Tool Call] {tool_name}({args_str})\n")
         return wrapper
 
@@ -983,8 +1072,9 @@ def run_analysis():
                 content = obj.report_sections[section_name]
                 if content:
                     file_name = f"{section_name}.md"
-                    with open(report_dir / file_name, "w") as f:
-                        f.write(content)
+                    text = "\n".join(str(item) for item in content) if isinstance(content, list) else content
+                    with open(report_dir / file_name, "w", encoding="utf-8") as f:
+                        f.write(text)
         return wrapper
 
     message_buffer.add_message = save_message_decorator(message_buffer, "add_message")
@@ -1000,6 +1090,8 @@ def run_analysis():
 
         # Add initial messages
         message_buffer.add_message("System", f"Selected ticker: {selections['ticker']}")
+        if selections["asset_type"] != "stock":
+            message_buffer.add_message("System", f"Detected asset type: {selections['asset_type']}")
         message_buffer.add_message(
             "System", f"Analysis date: {selections['analysis_date']}"
         )
@@ -1010,8 +1102,9 @@ def run_analysis():
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
         # Update agent status to in_progress for the first analyst
-        first_analyst = f"{selections['analysts'][0].value.capitalize()} Analyst"
+        first_analyst = get_initial_analyst_node(analyst_execution_plan)
         message_buffer.update_agent_status(first_analyst, "in_progress")
+        analyst_wall_time_tracker.mark_started(selected_analyst_keys[0])
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
         # Create spinner text
@@ -1020,9 +1113,18 @@ def run_analysis():
         )
         update_display(layout, spinner_text, stats_handler=stats_handler, start_time=start_time)
 
-        # Initialize state and get graph args with callbacks
+        # Initialize state and get graph args with callbacks.
+        # Resolve the instrument identity once here so all agents anchor to
+        # the real company (#814); the CLI builds state directly rather than
+        # going through propagate(), so this must happen on the CLI path too.
+        instrument_context = graph.resolve_instrument_context(
+            selections["ticker"], selections["asset_type"]
+        )
         init_agent_state = graph.propagator.create_initial_state(
-            selections["ticker"], selections["analysis_date"]
+            selections["ticker"],
+            selections["analysis_date"],
+            asset_type=selections["asset_type"],
+            instrument_context=instrument_context,
         )
         # Pass callbacks to graph config for tool execution tracking
         # (LLM tracking is handled separately via LLM constructor)
@@ -1031,31 +1133,31 @@ def run_analysis():
         # Stream the analysis
         trace = []
         for chunk in graph.graph.stream(init_agent_state, **args):
-            # Process messages if present (skip duplicates via message ID)
-            if len(chunk["messages"]) > 0:
-                last_message = chunk["messages"][-1]
-                msg_id = getattr(last_message, "id", None)
+            # Process all messages in chunk, deduplicating by message ID
+            for message in chunk.get("messages", []):
+                msg_id = getattr(message, "id", None)
+                if msg_id is not None:
+                    if msg_id in message_buffer._processed_message_ids:
+                        continue
+                    message_buffer._processed_message_ids.add(msg_id)
 
-                if msg_id != message_buffer._last_message_id:
-                    message_buffer._last_message_id = msg_id
+                msg_type, content = classify_message_type(message)
+                if content and content.strip():
+                    message_buffer.add_message(msg_type, content)
 
-                    # Add message to buffer
-                    msg_type, content = classify_message_type(last_message)
-                    if content and content.strip():
-                        message_buffer.add_message(msg_type, content)
-
-                    # Handle tool calls
-                    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                        for tool_call in last_message.tool_calls:
-                            if isinstance(tool_call, dict):
-                                message_buffer.add_tool_call(
-                                    tool_call["name"], tool_call["args"]
-                                )
-                            else:
-                                message_buffer.add_tool_call(tool_call.name, tool_call.args)
+                if hasattr(message, "tool_calls") and message.tool_calls:
+                    for tool_call in message.tool_calls:
+                        if isinstance(tool_call, dict):
+                            message_buffer.add_tool_call(tool_call["name"], tool_call["args"])
+                        else:
+                            message_buffer.add_tool_call(tool_call.name, tool_call.args)
 
             # Update analyst statuses based on report state (runs on every chunk)
-            update_analyst_statuses(message_buffer, chunk)
+            update_analyst_statuses(
+                message_buffer,
+                chunk,
+                wall_time_tracker=analyst_wall_time_tracker,
+            )
 
             # Research Team - Handle Investment Debate State
             if chunk.get("investment_debate_state"):
@@ -1133,8 +1235,11 @@ def run_analysis():
 
             trace.append(chunk)
 
-        # Get final state and decision
-        final_state = trace[-1]
+        # Streamed chunks are per-node deltas, not full state. Merge them
+        # so every report field populated across the run is present.
+        final_state = {}
+        for chunk in trace:
+            final_state.update(chunk)
         decision = graph.process_signal(final_state["final_trade_decision"])
 
         # Update all agent statuses to completed
@@ -1144,6 +1249,7 @@ def run_analysis():
         message_buffer.add_message(
             "System", f"Completed analysis for {selections['analysis_date']}"
         )
+        message_buffer.add_message("System", analyst_wall_time_tracker.format_summary())
 
         # Update final report sections
         for section in message_buffer.report_sections.keys():
@@ -1154,6 +1260,7 @@ def run_analysis():
 
     # Post-analysis prompts (outside Live context for clean interaction)
     console.print("\n[bold cyan]Analysis Complete![/bold cyan]\n")
+    console.print(f"[dim]{analyst_wall_time_tracker.format_summary()}[/dim]")
 
     # Prompt to save report
     save_choice = typer.prompt("Save report?", default="Y").strip().upper()
@@ -1179,8 +1286,23 @@ def run_analysis():
 
 
 @app.command()
-def analyze():
-    run_analysis()
+def analyze(
+    checkpoint: bool = typer.Option(
+        False,
+        "--checkpoint",
+        help="Enable checkpoint/resume: save state after each node so a crashed run can resume.",
+    ),
+    clear_checkpoints: bool = typer.Option(
+        False,
+        "--clear-checkpoints",
+        help="Delete all saved checkpoints before running (force fresh start).",
+    ),
+):
+    if clear_checkpoints:
+        from tradingagents.graph.checkpointer import clear_all_checkpoints
+        n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
+        console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
+    run_analysis(checkpoint=checkpoint)
 
 
 if __name__ == "__main__":
